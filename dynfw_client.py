@@ -10,6 +10,8 @@ import zmq
 import zmq.auth
 import msgpack
 
+import subprocess
+
 
 TMP_CERT_LOCATION = os.path.join(tempfile.gettempdir(), "dynfw_client_certificates")
 DOWNLOADED_SERVER_KEY_PATH = os.path.join(tempfile.gettempdir(), "dynfw_client_certificates", "server.pub")
@@ -48,11 +50,17 @@ def get_arg_parser():
     return parser
 
 
-def process_message(msg_type, payload):
-    """Message processing
+def pfctl_table(command, data=[]):
+    try:
+        pfctl_out = subprocess.check_output(["/sbin/pfctl", "-t", "sentinel-bl", "-T", command] + data, text=True)
+        print(pfctl_out)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: {e}")
+    except FileNotFoundError:
+        print("pfctl not found")
 
-    Put something cool here!
-    """
+
+def process_message(msg_type, payload, sub):
     def make_report(data, preview_len=3):
         return "{{'version': {}, 'serial': {}, 'ts': {}, list: Length {}, {}{}}}".format(
             data["version"],
@@ -62,18 +70,28 @@ def process_message(msg_type, payload):
             ", ".join(data["list"][:preview_len]),
             "..." if len(data["list"]) > preview_len else ""
         )
+    
+    def pf_add(data, batch_len=10):
+        for i in range(0, len(data), batch_len):
+            pfctl_table("add", data[i:i + batch_len])
+    
 
     if msg_type == "dynfw/delta":
         print(msg_type, payload, sep=": ")
+        if payload["delta"] == "negative":
+            pfctl_table("del", [payload["ip"]])
+        elif payload["delta"] == "positive":
+            pfctl_table("add", [payload["ip"]])
 
-    elif msg_type == "dynfw/event":
-        print(msg_type, payload, sep=": ")
 
     elif msg_type == "dynfw/list":
         print(msg_type, make_report(payload), sep=": ")
+        pfctl_table("flush")
+        pf_add(payload["list"])
+        print("Loaded dynfw/list. Waiting for dynfw/delta ...")
+        sub.setsockopt(zmq.UNSUBSCRIBE, b"dynfw/list")
+        sub.setsockopt(zmq.SUBSCRIBE, b"dynfw/delta")
 
-    else:
-        print("Whow, unknown message type! There is something new in Turris:Sentinel project.")
 
 
 def main():
@@ -90,12 +108,13 @@ def main():
     ctx = zmq.Context.instance()
     sub = prepare_socket(ctx, args.server, args.port, server_key_file)
 
-    print("DynFW client connected and running...")
+    print("DynFW client connected and running. Waiting for dynfw/list ...")
     while True:
         msg = sub.recv_multipart()
         msg_type, payload = parse_msg(msg)
 
-        process_message(msg_type, payload)
+        process_message(msg_type, payload, sub)
+
 
 
 def prepare_tmp_dir():
@@ -121,8 +140,8 @@ def prepare_socket(ctx, addr, port, keyfile):
     sub.curve_serverkey = server_public
     sub.connect("tcp://{}:{}".format(addr, port))
 
-    # I want to subscribe to all messages
-    sub.setsockopt(zmq.SUBSCRIBE, b"dynfw/")
+    # I want to subscribe first list of BL IPs
+    sub.setsockopt(zmq.SUBSCRIBE, b"dynfw/list")
 
     return sub
 
