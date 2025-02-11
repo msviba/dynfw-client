@@ -11,7 +11,28 @@ import zmq.auth
 import msgpack
 
 import subprocess
+import logging
+import signal
+import sys
+import time
 
+# create logger
+logger = logging.getLogger("logging_dynfw")
+logger.setLevel(logging.DEBUG)
+
+# create formatter
+formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s",
+                              "%Y-%m-%d %H:%M:%S")
+
+
+# create console handler and set level to debug
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+# add formatter to ch
+ch.setFormatter(formatter)
+
+# add ch to logger
+logger.addHandler(ch)
 
 TMP_CERT_LOCATION = os.path.join(tempfile.gettempdir(), "dynfw_client_certificates")
 DOWNLOADED_SERVER_KEY_PATH = os.path.join(tempfile.gettempdir(), "dynfw_client_certificates", "server.pub")
@@ -19,6 +40,7 @@ DOWNLOADED_SERVER_KEY_PATH = os.path.join(tempfile.gettempdir(), "dynfw_client_c
 SN_MSG_REGEXP = "^([a-z0-9_]+/)*[a-z0-9_]+$"
 SN_MSG = re.compile(SN_MSG_REGEXP)
 
+run_true = True
 
 def get_arg_parser():
     parser = argparse.ArgumentParser()
@@ -49,35 +71,23 @@ def get_arg_parser():
 
     return parser
 
-
 def pfctl_table(command, data=[]):
     try:
-        pfctl_out = subprocess.check_output(["/sbin/pfctl", "-t", "sentinel-bl", "-T", command] + data, text=True)
-        print(pfctl_out)
+        pfctl_out = subprocess.check_output(["/sbin/pfctl", "-t", "sentinel-bl", "-T", command] + data, text=True, stderr=subprocess.STDOUT)
+        logger.info(pfctl_out.strip("\n\r")+" "+', '.join(data))
     except subprocess.CalledProcessError as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
     except FileNotFoundError:
-        print("pfctl not found")
+        logger.error("pfctl not found")
 
 
 def process_message(msg_type, payload, sub):
-    def make_report(data, preview_len=3):
-        return "{{'version': {}, 'serial': {}, 'ts': {}, list: Length {}, {}{}}}".format(
-            data["version"],
-            data["serial"],
-            data["ts"],
-            len(data["list"]),
-            ", ".join(data["list"][:preview_len]),
-            "..." if len(data["list"]) > preview_len else ""
-        )
-    
     def pf_add(data, batch_len=10):
         for i in range(0, len(data), batch_len):
             pfctl_table("add", data[i:i + batch_len])
     
 
     if msg_type == "dynfw/delta":
-        print(msg_type, payload, sep=": ")
         if payload["delta"] == "negative":
             pfctl_table("del", [payload["ip"]])
         elif payload["delta"] == "positive":
@@ -85,10 +95,9 @@ def process_message(msg_type, payload, sub):
 
 
     elif msg_type == "dynfw/list":
-        print(msg_type, make_report(payload), sep=": ")
         pfctl_table("flush")
         pf_add(payload["list"])
-        print("Loaded dynfw/list. Waiting for dynfw/delta ...")
+        logger.info("Loaded dynfw/list. Waiting for dynfw/delta ...")
         sub.setsockopt(zmq.UNSUBSCRIBE, b"dynfw/list")
         sub.setsockopt(zmq.SUBSCRIBE, b"dynfw/delta")
 
@@ -108,8 +117,9 @@ def main():
     ctx = zmq.Context.instance()
     sub = prepare_socket(ctx, args.server, args.port, server_key_file)
 
-    print("DynFW client connected and running. Waiting for dynfw/list ...")
-    while True:
+    signal.signal(signal.SIGINT, signal_handler)
+    logger.info("DynFW client connected and running. Waiting for dynfw/list ...")
+    while run_true:
         msg = sub.recv_multipart()
         msg_type, payload = parse_msg(msg)
 
@@ -183,6 +193,12 @@ def parse_msg(data):
 
     return msg_type, payload
 
+
+def signal_handler(sig, frame):
+    print('Ending...')
+    run_true = False
+    time.sleep(1)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
