@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# PROVIDE: dynfw
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+PATH=${PATH}:/usr/local/sbin:/usr/local/bin
+name="dynfw"
+desc="Connect to Sentinel (nic.cz) and use IP blacklist"
+rcvar=dynfw_enable
+
+load_rc_config ${name}
+
+dynfw_enable=${dynfw_enable-"NO"}
+pidfile=${dynfw_pidfile-"/var/run/dynfw/dynfw.pid"}
+
+start_precmd="dynfw_prestart"
+command="/usr/sbin/daemon"
+bin_python="/usr/local/bin/python3.11"
+dynfw_script="/root/git/dynfw-example-client/dynfw_client.py"
+command_args="-P $pidfile -t $name -o /var/log/dynfw.log $dynfw_script"
+
+dynfw_prestart()
+{
+   echo "Install pidfile directory"
+   install -d -m 0755 "$(dirname ${pidfile})"
+}
+
+
+#/usr/bin/nohup /usr/local/bin/python3.11 /root/git/dynfw-example-client/dynfw_client.py > /var/log/dynfw.log 2>&1 &
+
+
+run_rc_command "$1"
